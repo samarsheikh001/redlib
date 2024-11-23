@@ -454,20 +454,24 @@ impl Post {
 		Ok((posts, res["data"]["after"].as_str().unwrap_or_default().to_string()))
 	}
 }
-
-#[derive(Template)]
-#[template(path = "comment.html")]
-// Comment with content, post, score and data/time that it was posted
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Comment {
 	pub id: String,
 	pub kind: String,
+	#[serde(rename = "parentId")]
 	pub parent_id: String,
+	#[serde(rename = "parentKind")]
 	pub parent_kind: String,
+	#[serde(rename = "postLink")]
 	pub post_link: String,
+	#[serde(rename = "postAuthor")]
 	pub post_author: String,
 	pub body: String,
 	pub author: Author,
+	#[serde(rename = "score")]
 	pub score: (String, String),
+	#[serde(rename = "relTime")]
 	pub rel_time: String,
 	pub created: String,
 	pub edited: (String, String),
@@ -475,7 +479,9 @@ pub struct Comment {
 	pub highlighted: bool,
 	pub awards: Awards,
 	pub collapsed: bool,
+	#[serde(rename = "isFiltered")]
 	pub is_filtered: bool,
+	#[serde(rename = "moreCount")]
 	pub more_count: i64,
 	pub prefs: Preferences,
 }
@@ -601,28 +607,45 @@ pub struct Params {
 	pub before: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Preferences {
+	#[serde(rename = "availableThemes")]
 	pub available_themes: Vec<String>,
 	pub theme: String,
+	#[serde(rename = "frontPage")]
 	pub front_page: String,
 	pub layout: String,
 	pub wide: String,
+	#[serde(rename = "blurSpoiler")]
 	pub blur_spoiler: String,
+	#[serde(rename = "showNsfw")]
 	pub show_nsfw: String,
+	#[serde(rename = "blurNsfw")]
 	pub blur_nsfw: String,
+	#[serde(rename = "hideHlsNotification")]
 	pub hide_hls_notification: String,
+	#[serde(rename = "videoQuality")]
 	pub video_quality: String,
+	#[serde(rename = "hideSidebarAndSummary")]
 	pub hide_sidebar_and_summary: String,
+	#[serde(rename = "useHls")]
 	pub use_hls: String,
+	#[serde(rename = "autoplayVideos")]
 	pub autoplay_videos: String,
+	#[serde(rename = "fixedNavbar")]
 	pub fixed_navbar: String,
+	#[serde(rename = "disableVisitRedditConfirmation")]
 	pub disable_visit_reddit_confirmation: String,
+	#[serde(rename = "commentSort")]
 	pub comment_sort: String,
+	#[serde(rename = "postSort")]
 	pub post_sort: String,
 	pub subscriptions: Vec<String>,
 	pub filters: Vec<String>,
+	#[serde(rename = "hideAwards")]
 	pub hide_awards: String,
+	#[serde(rename = "hideScore")]
 	pub hide_score: String,
 }
 

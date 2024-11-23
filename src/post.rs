@@ -6,28 +6,14 @@ use crate::config::get_setting;
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
 use crate::utils::{
-	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
+	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
 };
-use hyper::{Body, Request, Response};
+use hyper::{header, Body, Request, Response};
+use serde_json::json;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use rinja::Template;
 use std::collections::{HashMap, HashSet};
-
-// STRUCTS
-#[derive(Template)]
-#[template(path = "post.html")]
-struct PostTemplate {
-	comments: Vec<Comment>,
-	post: Post,
-	sort: String,
-	prefs: Preferences,
-	single_thread: bool,
-	url: String,
-	url_without_query: String,
-	comment_query: String,
-}
 
 static COMMENT_SEARCH_CAPTURE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
 
@@ -52,16 +38,11 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 		}
 	});
 
-	// Log the post ID being fetched in debug mode
-	#[cfg(debug_assertions)]
-	req.param("id").unwrap_or_default();
-
 	let single_thread = req.param("comment_id").is_some();
 	let highlighted_comment = &req.param("comment_id").unwrap_or_default();
 
 	// Send a request to the url, receive JSON in response
 	match json(path, quarantined).await {
-		// Otherwise, grab the JSON output from the request
 		Ok(response) => {
 			// Parse the JSON into Post and Comment structs
 			let post = parse_post(&response[0]["data"]["children"][0]).await;
@@ -88,19 +69,25 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				_ => query_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
 			};
 
-			// Use the Post and Comment structs to generate a website to show users
-			Ok(template(&PostTemplate {
-				comments,
-				post,
-				url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
-				sort,
-				prefs: Preferences::new(&req),
-				single_thread,
-				url: req_url,
-				comment_query: query,
-			}))
+			// Create JSON response
+			let response_data = json!({
+					"post": post,
+					"comments": comments,
+					"sort": sort,
+					"preferences": Preferences::new(&req),
+					"single_thread": single_thread,
+					"url": req_url,
+					"url_without_query": url.trim_end_matches(&format!("?q={query}&type=comment")),
+					"comment_query": query
+			});
+
+			// Build and return JSON response
+			let response_body = serde_json::to_string(&response_data).map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+
+			let mut response = Response::new(Body::from(response_body));
+			response.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("application/json"));
+			Ok(response)
 		}
-		// If the Reddit API returns an error, exit and send error page to user
 		Err(msg) => {
 			if msg == "quarantined" || msg == "gated" {
 				let sub = req.param("sub").unwrap_or_default();

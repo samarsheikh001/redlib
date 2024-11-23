@@ -14,6 +14,18 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use time::{Duration, OffsetDateTime};
 
+use serde_json::{json, Value as JsonValue};
+
+static GEO_FILTER_MATCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"geo_filter=(?<region>\w+)").unwrap());
+
+// Helper function to create JSON responses
+fn json_response(data: JsonValue) -> Response<Body> {
+	Response::builder()
+		.header("content-type", "application/json")
+		.body(Body::from(data.to_string()))
+		.unwrap_or_default()
+}
+
 // STRUCTS
 #[derive(Template)]
 #[template(path = "subreddit.html")]
@@ -55,11 +67,28 @@ struct WallTemplate {
 	url: String,
 }
 
-static GEO_FILTER_MATCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"geo_filter=(?<region>\w+)").unwrap());
+fn subreddit_to_json(sub: &Subreddit) -> JsonValue {
+	json!({
+			"name": sub.name,
+			"title": sub.title,
+			"description": sub.description,
+			"info": sub.info,
+			"icon": sub.icon,
+			"members": {
+					"count": sub.members.0,
+					"display": sub.members.1,
+			},
+			"active": {
+					"count": sub.active.0,
+					"display": sub.active.1,
+			},
+			"wiki_enabled": sub.wiki,
+			"nsfw": sub.nsfw,
+	})
+}
 
 // SERVICES
 pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
-	// Build Reddit API path
 	let root = req.uri().path() == "/";
 	let query = req.uri().query().unwrap_or_default().to_string();
 	let subscribed = setting(&req, "subscriptions");
@@ -78,7 +107,6 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	});
 	let quarantined = can_access_quarantine(&req, &sub_name) || root;
 
-	// Handle random subreddits
 	if let Ok(random) = catch_random(&sub_name, "").await {
 		return Ok(random);
 	}
@@ -87,19 +115,15 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 		return Ok(redirect(&["/user/", &sub_name[2..]].concat()));
 	}
 
-	// Request subreddit metadata
 	let sub = if !sub_name.contains('+') && sub_name != subscribed && sub_name != "popular" && sub_name != "all" {
-		// Regular subreddit
 		subreddit(&sub_name, quarantined).await.unwrap_or_default()
 	} else if sub_name == subscribed {
-		// Subscription feed
 		if req.uri().path().starts_with("/r/") {
 			subreddit(&sub_name, quarantined).await.unwrap_or_default()
 		} else {
 			Subreddit::default()
 		}
 	} else {
-		// Multireddit, all, popular
 		Subreddit {
 			name: sub_name.clone(),
 			..Subreddit::default()
@@ -107,8 +131,6 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	};
 
 	let req_url = req.uri().to_string();
-	// Return landing page if this post if this is NSFW community but the user
-	// has disabled the display of NSFW content or if the instance is SFW-only.
 	if sub.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
 		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
 	}
@@ -123,54 +145,83 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	}
 
 	let path = format!("/r/{}/{sort}.json?{}{params}", sub_name.replace('+', "%2B"), req.uri().query().unwrap_or_default());
-	let url = String::from(req.uri().path_and_query().map_or("", |val| val.as_str()));
-	let redirect_url = url[1..].replace('?', "%3F").replace('&', "%26").replace('+', "%2B");
 	let filters = get_filters(&req);
 
-	// If all requested subs are filtered, we don't need to fetch posts.
 	if sub_name.split('+').all(|s| filters.contains(s)) {
-		Ok(template(&SubredditTemplate {
-			sub,
-			posts: Vec::new(),
-			sort: (sort, param(&path, "t").unwrap_or_default()),
-			ends: (param(&path, "after").unwrap_or_default(), String::new()),
-			prefs: Preferences::new(&req),
-			url,
-			redirect_url,
-			is_filtered: true,
-			all_posts_filtered: false,
-			all_posts_hidden_nsfw: false,
-			no_posts: false,
-		}))
+		Ok(json_response(json!({
+				"subreddit": subreddit_to_json(&sub),
+				"posts": [],
+				"sort": {
+						"type": sort,
+						"time": param(&path, "t").unwrap_or_default()
+				},
+				"pagination": {
+						"after": param(&path, "after").unwrap_or_default(),
+						"before": ""
+				},
+				"meta": {
+						"is_filtered": true,
+						"all_posts_filtered": false,
+						"all_posts_hidden_nsfw": false,
+						"no_posts": true
+				}
+		})))
 	} else {
 		match Post::fetch(&path, quarantined).await {
 			Ok((mut posts, after)) => {
 				let (_, all_posts_filtered) = filter_posts(&mut posts, &filters);
 				let no_posts = posts.is_empty();
 				let all_posts_hidden_nsfw = !no_posts && (posts.iter().all(|p| p.flags.nsfw) && setting(&req, "show_nsfw") != "on");
+
 				if sort == "new" {
 					posts.sort_by(|a, b| b.created_ts.cmp(&a.created_ts));
 					posts.sort_by(|a, b| b.flags.stickied.cmp(&a.flags.stickied));
 				}
-				Ok(template(&SubredditTemplate {
-					sub,
-					posts,
-					sort: (sort, param(&path, "t").unwrap_or_default()),
-					ends: (param(&path, "after").unwrap_or_default(), after),
-					prefs: Preferences::new(&req),
-					url,
-					redirect_url,
-					is_filtered: false,
-					all_posts_filtered,
-					all_posts_hidden_nsfw,
-					no_posts,
-				}))
+
+				Ok(json_response(json!({
+						"subreddit": subreddit_to_json(&sub),
+						"posts": posts,
+						"sort": {
+								"type": sort,
+								"time": param(&path, "t").unwrap_or_default()
+						},
+						"pagination": {
+								"after": param(&path, "after").unwrap_or_default(),
+								"before": after
+						},
+						"meta": {
+								"is_filtered": false,
+								"all_posts_filtered": all_posts_filtered,
+								"all_posts_hidden_nsfw": all_posts_hidden_nsfw,
+								"no_posts": no_posts
+						}
+				})))
 			}
 			Err(msg) => match msg.as_str() {
-				"quarantined" | "gated" => Ok(quarantine(&req, sub_name, &msg)),
-				"private" => error(req, &format!("r/{sub_name} is a private community")).await,
-				"banned" => error(req, &format!("r/{sub_name} has been banned from Reddit")).await,
-				_ => error(req, &msg).await,
+				"quarantined" | "gated" => Ok(json_response(json!({
+						"error": {
+								"type": msg,
+								"message": format!("r/{} is {}", sub_name, msg)
+						}
+				}))),
+				"private" => Ok(json_response(json!({
+						"error": {
+								"type": "private",
+								"message": format!("r/{} is a private community", sub_name)
+						}
+				}))),
+				"banned" => Ok(json_response(json!({
+						"error": {
+								"type": "banned",
+								"message": format!("r/{} has been banned from Reddit", sub_name)
+						}
+				}))),
+				_ => Ok(json_response(json!({
+						"error": {
+								"type": "unknown",
+								"message": msg
+						}
+				}))),
 			},
 		}
 	}
@@ -434,17 +485,12 @@ pub async fn sidebar(req: Request<Body>) -> Result<Response<Body>, String> {
 
 // SUBREDDIT
 async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
-	// Build the Reddit JSON API url
 	let path: String = format!("/r/{sub}/about.json?raw_json=1");
-
-	// Send a request to the url
 	let res = json(path, quarantined).await?;
 
-	// Metadata regarding the subreddit
 	let members: i64 = res["data"]["subscribers"].as_u64().unwrap_or_default() as i64;
 	let active: i64 = res["data"]["accounts_active"].as_u64().unwrap_or_default() as i64;
 
-	// Fetch subreddit icon either from the community_icon or icon_img value
 	let community_icon: &str = res["data"]["community_icon"].as_str().unwrap_or_default();
 	let icon = if community_icon.is_empty() { val(&res, "icon_img") } else { community_icon.to_string() };
 
@@ -453,10 +499,9 @@ async fn subreddit(sub: &str, quarantined: bool) -> Result<Subreddit, String> {
 		title: val(&res, "title"),
 		description: val(&res, "public_description"),
 		info: rewrite_urls(&val(&res, "description_html")),
-		// moderators: moderators_list(sub, quarantined).await.unwrap_or_default(),
 		icon: format_url(&icon),
-		members: format_num(members),
-		active: format_num(active),
+		members: format_num(members), // Just using format_num directly to get a String
+		active: format_num(active),   // Just using format_num directly to get a String
 		wiki: res["data"]["wiki_enabled"].as_bool().unwrap_or_default(),
 		nsfw: res["data"]["over18"].as_bool().unwrap_or_default(),
 	})
